@@ -3,9 +3,8 @@ apply plugin: 'com.android.library'
 
 import org.apache.tools.ant.taskdefs.condition.Os
 
-// Why: detect NDK availability so CI without NDK won't fail.
+// Find NDK in local.properties, env vars, or a common path
 def findNdkDir = {
-    // 1) look for local.properties -> ndk.dir
     def localFile = project.rootProject.file('local.properties')
     if (localFile.exists()) {
         try {
@@ -15,12 +14,10 @@ def findNdkDir = {
             if (ndkProp && file(ndkProp).exists()) return file(ndkProp).absolutePath
         } catch (ignored) { }
     }
-    // 2) check environment variables
     ['ANDROID_NDK_HOME', 'NDK_HOME', 'ANDROID_NDK_ROOT'].each { env ->
         def v = System.getenv(env)
         if (v && file(v).exists()) return file(v).absolutePath
     }
-    // 3) common path seen in logs / older SDK setups
     def common = '/opt/android-sdk-linux/ndk-bundle'
     if (file(common).exists()) return file(common).absolutePath
     return null
@@ -52,47 +49,42 @@ android {
 
     sourceSets {
         main {
-            // keep prebuilt native libs here if you add them
             jniLibs.srcDir 'src/main/libs'
             jni.srcDirs = []
         }
     }
 }
 
-// Tasks that previously failed when NDK missing:
-// create real Exec tasks only if NDK exists; otherwise create no-op tasks that just log.
+// Create ndkBuild/ndkClean tasks differently depending on NDK presence
 if (ndkAvailable) {
-    // compute ndk-build executable path
-    String getNdkBuildPath() {
+    task ndkBuild(type: Exec, description: 'Compile JNI source via NDK') {
+        println('executing ndkBuild')
         def ndkBuildPath = ndkDir
         if (Os.isFamily(Os.FAMILY_WINDOWS)) {
             ndkBuildPath = ndkDir + '/ndk-build.cmd'
         } else {
             ndkBuildPath = ndkDir + '/ndk-build'
         }
-        return ndkBuildPath
-    }
-
-    task ndkBuild(type: Exec, description: 'Compile JNI source via NDK') {
-        println('executing ndkBuild')
-        def ndkBuildPath = getNdkBuildPath()
         commandLine ndkBuildPath, '-j8', '-C', file('src/main').absolutePath
     }
 
     task ndkClean(type: Exec, description: 'clean JNI libraries') {
         println('executing ndkBuild clean')
-        def ndkBuildPath = getNdkBuildPath()
+        def ndkBuildPath = ndkDir
+        if (Os.isFamily(Os.FAMILY_WINDOWS)) {
+            ndkBuildPath = ndkDir + '/ndk-build.cmd'
+        } else {
+            ndkBuildPath = ndkDir + '/ndk-build'
+        }
         commandLine ndkBuildPath, 'clean', '-C', file('src/main').absolutePath
     }
 
-    // make Java compilation depend on ndkBuild
     tasks.withType(JavaCompile) { compileTask ->
         compileTask.dependsOn ndkBuild
     }
 
     logger.lifecycle("NDK found at: ${ndkDir} — native build enabled.")
 } else {
-    // create harmless placeholder tasks so other code can safely depend on them
     task ndkBuild {
         doLast {
             logger.warn("NDK not found. Skipping ndkBuild. If you need native build on CI, provide NDK or prebuilt jniLibs.")
@@ -103,11 +95,9 @@ if (ndkAvailable) {
             logger.warn("NDK not found. Skipping ndkClean.")
         }
     }
-    // do NOT add compileTask.dependsOn ndkBuild here (no native build)
     logger.warn("NDK not found (checked local.properties, env vars, /opt/android-sdk-linux/ndk-bundle). Native tasks disabled.")
 }
 
-// ensure clean depends on ndkClean (exists in both branches)
 clean.dependsOn 'ndkClean'
 
 dependencies {
