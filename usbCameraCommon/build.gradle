@@ -26,7 +26,6 @@ apply plugin: 'com.android.library'
 android {
     compileSdkVersion versionCompiler
    	buildToolsVersion versionBuildTool
-	ndkVersion "25.2.9519653"
    	compileOptions {
    		sourceCompatibility javaSourceCompatibility
    		targetCompatibility javaTargetCompatibility
