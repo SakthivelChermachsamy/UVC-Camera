@@ -1,41 +1,46 @@
+// File: libuvccamera/build.gradle
 apply plugin: 'com.android.library'
-/*
- *  UVCCamera
- *  library and sample to access to UVC web camera on non-rooted Android device
- *
- * Copyright (c) 2014-2017 saki t_saki@serenegiant.com
- *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *   You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- *   Unless required by applicable law or agreed to in writing, software
- *   distributed under the License is distributed on an "AS IS" BASIS,
- *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *   See the License for the specific language governing permissions and
- *   limitations under the License.
- *
- *  All files in the folder are under this Apache License, Version 2.0.
- *  Files in the libjpeg-turbo, libusb, libuvc, rapidjson folder
- *  may have a different license, see the respective files.
- */
 
 import org.apache.tools.ant.taskdefs.condition.Os
 
-android {
-	compileSdkVersion versionCompiler
-	buildToolsVersion versionBuildTool
+// Why: detect NDK availability so CI without NDK won't fail.
+def findNdkDir = {
+    // 1) look for local.properties -> ndk.dir
+    def localFile = project.rootProject.file('local.properties')
+    if (localFile.exists()) {
+        try {
+            Properties props = new Properties()
+            props.load(localFile.newDataInputStream())
+            def ndkProp = props.getProperty('ndk.dir')
+            if (ndkProp && file(ndkProp).exists()) return file(ndkProp).absolutePath
+        } catch (ignored) { }
+    }
+    // 2) check environment variables
+    ['ANDROID_NDK_HOME', 'NDK_HOME', 'ANDROID_NDK_ROOT'].each { env ->
+        def v = System.getenv(env)
+        if (v && file(v).exists()) return file(v).absolutePath
+    }
+    // 3) common path seen in logs / older SDK setups
+    def common = '/opt/android-sdk-linux/ndk-bundle'
+    if (file(common).exists()) return file(common).absolutePath
+    return null
+}
 
-	compileOptions {
-		sourceCompatibility javaSourceCompatibility
-		targetCompatibility javaTargetCompatibility
-	}
+def ndkDir = findNdkDir()
+def ndkAvailable = ndkDir != null
+
+android {
+    compileSdkVersion versionCompiler
+    buildToolsVersion versionBuildTool
+
+    compileOptions {
+        sourceCompatibility javaSourceCompatibility
+        targetCompatibility javaTargetCompatibility
+    }
 
     defaultConfig {
         minSdkVersion 14
-		targetSdkVersion versionTarget
+        targetSdkVersion versionTarget
     }
 
     buildTypes {
@@ -44,52 +49,74 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.txt'
         }
     }
-	sourceSets {
-		main {
-			jniLibs.srcDir 'src/main/libs'
-			jni.srcDirs = []
-		}
-	}
+
+    sourceSets {
+        main {
+            // keep prebuilt native libs here if you add them
+            jniLibs.srcDir 'src/main/libs'
+            jni.srcDirs = []
+        }
+    }
 }
 
-tasks.withType(JavaCompile) {
-	compileTask -> compileTask.dependsOn ndkBuild
+// Tasks that previously failed when NDK missing:
+// create real Exec tasks only if NDK exists; otherwise create no-op tasks that just log.
+if (ndkAvailable) {
+    // compute ndk-build executable path
+    String getNdkBuildPath() {
+        def ndkBuildPath = ndkDir
+        if (Os.isFamily(Os.FAMILY_WINDOWS)) {
+            ndkBuildPath = ndkDir + '/ndk-build.cmd'
+        } else {
+            ndkBuildPath = ndkDir + '/ndk-build'
+        }
+        return ndkBuildPath
+    }
+
+    task ndkBuild(type: Exec, description: 'Compile JNI source via NDK') {
+        println('executing ndkBuild')
+        def ndkBuildPath = getNdkBuildPath()
+        commandLine ndkBuildPath, '-j8', '-C', file('src/main').absolutePath
+    }
+
+    task ndkClean(type: Exec, description: 'clean JNI libraries') {
+        println('executing ndkBuild clean')
+        def ndkBuildPath = getNdkBuildPath()
+        commandLine ndkBuildPath, 'clean', '-C', file('src/main').absolutePath
+    }
+
+    // make Java compilation depend on ndkBuild
+    tasks.withType(JavaCompile) { compileTask ->
+        compileTask.dependsOn ndkBuild
+    }
+
+    logger.lifecycle("NDK found at: ${ndkDir} — native build enabled.")
+} else {
+    // create harmless placeholder tasks so other code can safely depend on them
+    task ndkBuild {
+        doLast {
+            logger.warn("NDK not found. Skipping ndkBuild. If you need native build on CI, provide NDK or prebuilt jniLibs.")
+        }
+    }
+    task ndkClean {
+        doLast {
+            logger.warn("NDK not found. Skipping ndkClean.")
+        }
+    }
+    // do NOT add compileTask.dependsOn ndkBuild here (no native build)
+    logger.warn("NDK not found (checked local.properties, env vars, /opt/android-sdk-linux/ndk-bundle). Native tasks disabled.")
 }
 
-String getNdkBuildPath() {
-	Properties properties = new Properties()
-	properties.load(project.rootProject.file('local.properties').newDataInputStream())
-	def ndkBuildingDir = properties.getProperty("ndk.dir")
-	def ndkBuildPath = ndkBuildingDir
-	if (Os.isFamily(Os.FAMILY_WINDOWS)) {
-		ndkBuildPath = ndkBuildingDir + '/ndk-build.cmd'
-	} else {
-		ndkBuildPath = ndkBuildingDir + '/ndk-build'
-	}
-	return ndkBuildPath
-}
-
-task ndkBuild(type: Exec, description: 'Compile JNI source via NDK') {
-	println('executing ndkBuild')
-	def ndkBuildPath = getNdkBuildPath();
-	commandLine ndkBuildPath, '-j8', '-C', file('src/main').absolutePath
-}
-
-task ndkClean(type: Exec, description: 'clean JNI libraries') {
-	println('executing ndkBuild clean')
-	def ndkBuildPath = getNdkBuildPath();
-	commandLine ndkBuildPath, 'clean', '-C', file('src/main').absolutePath
-}
-
+// ensure clean depends on ndkClean (exists in both branches)
 clean.dependsOn 'ndkClean'
 
 dependencies {
     implementation fileTree(dir: new File(buildDir, 'libs'), include: '*.jar')
 
-	implementation "com.android.support:support-v4:${supportLibVersion}"
-	implementation "com.android.support:support-annotations:${supportLibVersion}"
+    implementation "com.android.support:support-v4:${supportLibVersion}"
+    implementation "com.android.support:support-annotations:${supportLibVersion}"
 
-	implementation("com.serenegiant:common:${commonLibVersion}") {
-		exclude module: 'support-v4'
-	}
+    implementation("com.serenegiant:common:${commonLibVersion}") {
+        exclude module: 'support-v4'
+    }
 }
